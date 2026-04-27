@@ -1,0 +1,14 @@
+# 비밀번호 파일 제외
+pass.txt
+
+# Claude 세션 폴더
+.claude/
+
+# 백업 파일
+*.bak
+salmana_backup/
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db
+desktop.ini
