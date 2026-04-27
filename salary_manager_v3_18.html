@@ -2852,6 +2852,15 @@ function calcTaxFormula(monthPay, family){
 }
 
 
+// 해당 월이 완전히 계약 외 기간인지 판단
+function isMonthOffContract(emp){
+  if(!emp.start || !emp.end) return false;
+  const daysInMonth = new Date(curYear, curMonth, 0).getDate();
+  const monthStart = dateStr(curYear, curMonth, 1);
+  const monthEnd   = dateStr(curYear, curMonth, daysInMonth);
+  return monthEnd < emp.start || monthStart > emp.end;
+}
+
 // -- RENDER --
 function renderSidebar(){
   const list=document.getElementById('empList');
@@ -2870,18 +2879,24 @@ function renderSidebar(){
     return;
   }
   list.innerHTML=sorted.map(emp=>{
+    const offContract = isMonthOffContract(emp);
     const pay=calcPay(emp);
     const warn=getWeeklyWarning(emp);
-    if(warn.level > hdLevel) hdLevel = warn.level;
-    if(warn.level === 2) warn2cnt++;
-    else if(warn.level === 1) warn1cnt++;
-    const warnBadge = warn.level===2 ? '<span title="주 52시간 초과!"><svg class="si si-sm" aria-hidden="true" style="color:#e11d48"><use href="#i-alert"/></svg></span>'
-                    : warn.level===1 ? '<span title="주 40시간 초과"><svg class="si si-sm" aria-hidden="true" style="color:#d97706"><use href="#i-warn"/></svg></span>' : '';
+    if(!offContract){
+      if(warn.level > hdLevel) hdLevel = warn.level;
+      if(warn.level === 2) warn2cnt++;
+      else if(warn.level === 1) warn1cnt++;
+    }
+    const warnBadge = !offContract && warn.level===2 ? '<span title="주 52시간 초과!"><svg class="si si-sm" aria-hidden="true" style="color:#e11d48"><use href="#i-alert"/></svg></span>'
+                    : !offContract && warn.level===1 ? '<span title="주 40시간 초과"><svg class="si si-sm" aria-hidden="true" style="color:#d97706"><use href="#i-warn"/></svg></span>' : '';
+    const pyText = offContract
+      ? `<span style="color:var(--text3);font-size:11px">계약 외 기간</span>`
+      : `${fmt(pay.실수령액)}원`;
     return `<div class="emp-item ${emp.id===curEmpId?'active':''}" onclick="selectEmp(${emp.id})">
       <div class="emp-av" style="background:${gradeColor(pay.repGrade)}">${gradeAbbr(pay.repGrade)}</div>
       <div style="flex:1;min-width:0">
         <div class="emp-nm">${emp.name} ${warnBadge}${emp.자차등록?'<span title="자차등록" style="display:inline-flex;align-items:center;vertical-align:middle"><svg class="si si-sm" aria-hidden="true"><use href="#i-car"/></svg></span>':''}</div>
-        <div class="emp-py">${fmt(pay.실수령액)}원</div>
+        <div class="emp-py">${pyText}</div>
       </div>
       <button class="emp-del" onclick="event.stopPropagation();deleteEmp(${emp.id})" title="삭제">✕</button>
     </div>`;
@@ -2929,19 +2944,50 @@ function renderMain(){
 }
 
 function summaryStrip(emp,pay,m){
-  // 주간 최대 시간 계산 → 경고 배지
-  const wkMap = calcWeeklyHoursMap(emp);
+  const offContract = isMonthOffContract(emp);
+
+  // 주간 최대 시간 계산 → 경고 배지 (계약외 월은 표시 안 함)
+  const wkMap = offContract ? {} : calcWeeklyHoursMap(emp);
   const maxWkH = Object.values(wkMap).reduce((a,b)=>Math.max(a,b), 0);
   const wkBadge = maxWkH > 52
     ? `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:8px;padding:1px 7px;background:#fee2e2;color:#e11d48;font-size:11px;font-weight:700;border-radius:10px;vertical-align:middle"><svg class=\"si si-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"/></svg> 주 ${Math.round(maxWkH*10)/10}h 초과</span>`
     : maxWkH > 40
     ? `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:8px;padding:1px 7px;background:#fef3c7;color:#d97706;font-size:11px;font-weight:700;border-radius:10px;vertical-align:middle"><svg class=\"si si-sm\" aria-hidden=\"true\"><use href=\"#i-warn\"/></svg> 주 ${Math.round(maxWkH*10)/10}h</span>`
     : '';
+
+  // 계약 외 기간 배지
+  const offBadge = offContract
+    ? `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:8px;padding:1px 9px;background:#f1f5f9;color:#64748b;font-size:11px;font-weight:700;border-radius:10px;vertical-align:middle">계약 외 기간</span>`
+    : '';
+
+  // 수치 표시: 계약 외 월은 모두 "-"
+  const dash = `<span style="color:var(--text3)">-</span>`;
+  const salaryBlock = offContract
+    ? `<div class="strip-salary">
+        <div class="strip-salary-label">실 수령액</div>
+        <div class="strip-salary-value" style="color:var(--text3)">-</div>
+        <div class="strip-salary-sub">계약 외 기간</div>
+      </div>`
+    : `<div class="strip-salary">
+        <div class="strip-salary-label">실 수령액 <span style="font-size:10px;color:var(--text3);font-weight:400">(적용 보수월액 ${fmt(pay.적용보수월액)}원 구간)</span></div>
+        <div class="strip-salary-value">${fmt(pay.실수령액)}원</div>
+        <div class="strip-salary-sub">지급 ${fmt(pay.지급.지급합계)} / 공제 ${fmt(pay.공제근.공제합계)}</div>
+      </div>`;
+  const statCards = offContract
+    ? `<div class="stat-card"><div class="stat-label">수당 합계</div><div class="stat-value">${dash}</div></div>
+       <div class="stat-card"><div class="stat-label">4대보험(근로자)</div><div class="stat-value">${dash}</div></div>
+       <div class="stat-card"><div class="stat-label">소득세 합계</div><div class="stat-value">${dash}</div></div>
+       <div class="stat-card"><div class="stat-label">잔여 월차</div><div class="stat-value">${dash}</div></div>`
+    : `<div class="stat-card"><div class="stat-label">수당 합계</div><div class="stat-value green">${fmt(pay.지급.지급합계)}</div></div>
+       <div class="stat-card"><div class="stat-label">4대보험(근로자)</div><div class="stat-value red">${fmt(pay.공제근.보험근합)}</div></div>
+       <div class="stat-card"><div class="stat-label">소득세 합계</div><div class="stat-value yellow">${fmt(pay.공제근.세금합)}</div></div>
+       <div class="stat-card"><div class="stat-label">잔여 월차</div><div class="stat-value blue">${pay.월차.잔여}일</div></div>`;
+
   return `<div class="summary-strip no-print">
     <div class="strip-emp">
       <div class="strip-av" style="background:${gradeColor(pay.repGrade)}">${gradeAbbr(pay.repGrade)}</div>
       <div class="strip-emp-info">
-        <h2>${emp.name}${wkBadge}</h2>
+        <h2>${emp.name}${wkBadge}${offBadge}</h2>
         <div class="strip-meta">
           <div class="strip-tag"><svg class="si si-sm" aria-hidden="true"><use href="#i-save"/></svg> <b>${emp.bank} ${emp.account}</b></div>
           <div class="strip-tag"><svg class="si si-sm" aria-hidden="true"><use href="#i-clipboard"/></svg> <b>${pay.repGrade}</b>${pay.repGrade!==emp.grade?`<span style="color:#2563eb;font-size:10px;font-weight:400;margin-left:3px">(기본: ${emp.grade})</span>`:''}${emp.shift?`<span style="color:var(--text3);font-weight:400;margin-left:4px">(${emp.shift}조)</span>`:''} ${emp.gradeHistory&&emp.gradeHistory.length>0?`<span style="background:#2563eb;color:white;font-size:9px;padding:1px 5px;border-radius:8px;margin-left:4px">구분변경 ${emp.gradeHistory.length}건</span>`:''}</div>
@@ -2950,15 +2996,8 @@ function summaryStrip(emp,pay,m){
         </div>
       </div>
     </div>
-    <div class="strip-salary">
-      <div class="strip-salary-label">실 수령액 <span style="font-size:10px;color:var(--text3);font-weight:400">(적용 보수월액 ${fmt(pay.적용보수월액)}원 구간)</span></div>
-      <div class="strip-salary-value">${fmt(pay.실수령액)}원</div>
-      <div class="strip-salary-sub">지급 ${fmt(pay.지급.지급합계)} / 공제 ${fmt(pay.공제근.공제합계)}</div>
-    </div>
-    <div class="stat-card"><div class="stat-label">수당 합계</div><div class="stat-value green">${fmt(pay.지급.지급합계)}</div></div>
-    <div class="stat-card"><div class="stat-label">4대보험(근로자)</div><div class="stat-value red">${fmt(pay.공제근.보험근합)}</div></div>
-    <div class="stat-card"><div class="stat-label">소득세 합계</div><div class="stat-value yellow">${fmt(pay.공제근.세금합)}</div></div>
-    <div class="stat-card"><div class="stat-label">잔여 월차</div><div class="stat-value blue">${pay.월차.잔여}일</div></div>
+    ${salaryBlock}
+    ${statCards}
   </div>`;
 }
 
@@ -3183,6 +3222,16 @@ function renderAttendance(emp,pay,m){
 function renderSalary(emp,pay,m){
   const j=pay.지급;
   const qr=emp=>(field,v)=>{const em=employees.find(e=>e.id===curEmpId);if(!em)return;const mo=getEmpMonth(em);mo[field]=parseFloat(v)||0;renderSidebar();renderMain();};
+  if(isMonthOffContract(emp)){
+    return `
+    ${summaryStrip(emp,pay,m)}
+    <div style="margin:24px 20px;padding:24px;background:#f8fafc;border:1.5px dashed #cbd5e1;border-radius:12px;text-align:center;color:#64748b">
+      <div style="font-size:22px;margin-bottom:8px">📅</div>
+      <div style="font-weight:700;font-size:14px;margin-bottom:4px">계약 외 기간입니다</div>
+      <div style="font-size:12px">계약 기간: <b>${emp.start} ~ ${emp.end}</b></div>
+      <div style="font-size:11px;margin-top:6px;color:#94a3b8">${curYear}년 ${curMonth}월은 계약 기간에 포함되지 않아 수당 계산이 적용되지 않습니다.</div>
+    </div>`;
+  }
   return `
     ${summaryStrip(emp,pay,m)}
     <div class="section">
@@ -3450,6 +3499,13 @@ function renderProfile(emp){
 }
 
 function renderCost(emp,pay){
+  if(isMonthOffContract(emp)){
+    return `<div style="margin:24px 20px;padding:24px;background:#f8fafc;border:1.5px dashed #cbd5e1;border-radius:12px;text-align:center;color:#64748b">
+      <div style="font-size:22px;margin-bottom:8px">📅</div>
+      <div style="font-weight:700;font-size:14px;margin-bottom:4px">계약 외 기간입니다</div>
+      <div style="font-size:12px">계약 기간: <b>${emp.start} ~ ${emp.end}</b></div>
+    </div>`;
+  }
   const s=pay.공제사;
   return `<div class="section">
     <div class="sec-hdr" onclick="toggleSec(this)">
@@ -4764,11 +4820,14 @@ function printStaff(){
     return;
   }
   addLog('PRINT_SLIP', `${curYear}년 ${curMonth}월 직원 명세서 출력 (${employees.length}명)`);
-  const sortedEmps=[...employees].sort((a,b)=>{
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e)).sort((a,b)=>{
     const ga=a.grade||'',gb=b.grade||'';
     if(ga!==gb) return ga.localeCompare(gb,'ko');
     return (a.name||'').localeCompare(b.name||'','ko');
   });
+  if(sortedEmps.length === 0){
+    showToast('이번 달 계약 기간에 해당하는 직원이 없습니다.'); return;
+  }
   const content=sortedEmps.map(emp=>{
     const pay=calcPay(emp);
     const m=getEmpMonth(emp);
@@ -4858,11 +4917,14 @@ function printManager(){
     return;
   }
   addLog('PRINT_MANAGER', `${curYear}년 ${curMonth}월 담당자 정리표 출력 (${employees.length}명)`);
-  const sortedEmps=[...employees].sort((a,b)=>{
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e)).sort((a,b)=>{
     const ga=a.grade||'',gb=b.grade||'';
     if(ga!==gb) return ga.localeCompare(gb,'ko');
     return (a.name||'').localeCompare(b.name||'','ko');
   });
+  if(sortedEmps.length === 0){
+    showToast('이번 달 계약 기간에 해당하는 직원이 없습니다.'); return;
+  }
 
   // 지급내역 테이블 rows
   const payRows=sortedEmps.map((emp,i)=>{
@@ -5272,11 +5334,14 @@ function printCalendar(){
   }
   addLog('PRINT_CAL', `${curYear}년 ${curMonth}월 근무 캘린더 출력 (${employees.length}명)`);
 
-  const sortedEmps = [...employees].sort((a,b) => {
+  const sortedEmps = [...employees].filter(e=>!isMonthOffContract(e)).sort((a,b) => {
     const ga=a.grade||'', gb=b.grade||'';
     if(ga!==gb) return ga.localeCompare(gb,'ko');
     return (a.name||'').localeCompare(b.name||'','ko');
   });
+  if(sortedEmps.length === 0){
+    showToast('이번 달 계약 기간에 해당하는 직원이 없습니다.'); return;
+  }
 
   const WTYPE = {'field_gov':'외근·관용','field_own':'외근·자차','office':'내근'};
   const DOW_KR = ['일','월','화','수','목','금','토'];
@@ -5546,7 +5611,7 @@ async function exportExcel(){
   if(employees.length===0){ showToast('직원 정보를 먼저 입력해주세요'); return; }
   showToast('엑셀 생성 중...');
 
-  const sortedEmps=[...employees].sort((a,b)=>{
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e)).sort((a,b)=>{
     const ga=a.grade||'',gb=b.grade||'';
     if(ga!==gb) return ga.localeCompare(gb,'ko');
     return (a.name||'').localeCompare(b.name||'','ko');
