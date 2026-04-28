@@ -1035,7 +1035,7 @@ header{
     <div class="mo-hdr"><span class="mo-title" id="dayMoTitle">근무 상태 수정</span><button class="mo-x" onclick="closeModal('dayMo')">✕</button></div>
     <div class="mo-body">
       <div id="dayMoTripLock" style="display:none;margin-bottom:10px;padding:8px 12px;background:#fef9c3;border:1px solid #fbbf24;border-radius:6px;font-size:11px;color:#92400e">
-        <svg class="si si-sm" aria-hidden="true"><use href="#i-refresh"/></svg> <b>관외출장 등록된 날짜</b>입니다. 출장 패널에서 삭제 후 수정할 수 있습니다.
+        <svg class="si si-sm" aria-hidden="true"><use href="#i-refresh"/></svg> <b>관외출장 등록된 날짜</b>입니다. 관내 실비(외근 실비·단속차량사례금)는 이 날 자동 제외됩니다. 출장 패널에서 삭제 후 수정할 수 있습니다.
       </div>
       <p style="font-size:12px;color:var(--text3);margin-bottom:12px">근무 상태를 선택하세요.</p>
       <div class="day-status-grid">
@@ -1994,6 +1994,7 @@ function calcPay(emp){
     const contractCheck=defaultDayStatus(curYear,curMonth,d,emp.grade,emp);
     if(contractCheck.type==='off-contract') continue;
     const status=days[d]||contractCheck;
+    if(status._tripLocked) continue;  // 관외출장일: 관내 실비·단속사례금 제외
     if(status.type.startsWith('work')){
       const over4h = status.fieldOver4h !== false;  // undefined/true → 4시간 이상 (기본값)
       if(status.worktype==='field_gov'){
@@ -3065,18 +3066,19 @@ function renderAttendance(emp,pay,m){
     else if(status.type==='health') badge='보건휴가';
     else if(status.type==='off') badge='결근';
 
-    // 외근 표시 (초과 근무에도)
+    // 외근 표시 (초과 근무에도) — 출장일엔 숨김
     let extraBadge='';
     let extraBadgeTrip='';
-    if(status.type.startsWith('work') && status.worktype){
+    const isTrip = !!(status._tripLocked);
+    if(!isTrip && status.type.startsWith('work') && status.worktype){
       const otherCarLabel = (status.worktype==='field_own'&&status.본인차량===false) ? ' <span style="color:#dc2626;font-size:8px">(타인차)</span>' : '';
       extraBadge=`<div class="day-extra">${WORKTYPE_LABEL[status.worktype]||''}${otherCarLabel}</div>`;
     }
     // 출장 잠금 표시
-    const isTrip = !!(status._tripLocked);
     if(isTrip) extraBadgeTrip = `<div style="font-size:8px;color:#2563eb;font-weight:700;display:inline-flex;align-items:center;gap:2px"><svg class="si si-sm" aria-hidden="true"><use href="#i-car"/></svg>출장</div>`;
 
-    const shiftStr = status.type.startsWith('work')
+    // 출장일엔 시간도 숨김
+    const shiftStr = !isTrip && status.type.startsWith('work')
       ? (status.timeIn && status.timeOut ? `${status.timeIn}~${status.timeOut}` : `${shift.in}~${shift.out}`)
       : '';
     const isContract = status.type !== 'off-contract';
@@ -3093,7 +3095,7 @@ function renderAttendance(emp,pay,m){
     cells+=`<div class="${cls} ${wkWarnClass}" ${dayOnclick}>
       <div class="day-num">${d}${isModified?'<span style="color:var(--orange);font-size:8px;vertical-align:top;margin-left:1px">●</span>':''}</div>
       ${wkWarnBadge}
-      <div class="day-badge">${badge}</div>
+      ${!isTrip?`<div class="day-badge">${badge}</div>`:''}
       ${extraBadge}
       ${extraBadgeTrip}
       ${shiftStr?`<div class="day-shift">${shiftStr}</div>`:''}
@@ -4424,6 +4426,13 @@ function openDayModal(d){
   });
   const saveBtn = document.getElementById('dayMoSaveBtn');
   if(saveBtn){ saveBtn.disabled = isTrip; saveBtn.style.opacity = isTrip ? '0.4' : ''; }
+  // 출장 잠금: 근무형태·출퇴근시간·메모 영역도 조작 불가
+  ['dayTimeFields','dayWorktypeFields'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){ el.style.pointerEvents=isTrip?'none':''; el.style.opacity=isTrip?'0.4':''; }
+  });
+  const memoEl2=document.getElementById('dayMoMemo');
+  if(memoEl2){ memoEl2.disabled=isTrip; memoEl2.style.opacity=isTrip?'0.4':''; }
   const ds_modal = dateStr(curYear,curMonth,d);
   document.getElementById('dayMoWorktype').value=status.worktype||getWorktypeAt(emp, ds_modal);
   // 출퇴근 시간 복원
