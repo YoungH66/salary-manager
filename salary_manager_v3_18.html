@@ -5065,7 +5065,7 @@ function printManager(){
     const 소득세계 = g.세금합;
     const 지급액110 = 수당합계 - 보험 - 소득세계;
     const 실비합 = j.비과세실비 + j.과세실비;
-    const 원천세신고 = 지급액110 + j.과세실비;
+    const 원천세신고 = 수당합계 + j.과세실비;  // 공제 전 수당합계(110-04) + 과세실비(220-01)
     return {
       i, emp, pay, j, g,
       수당합계, 보험, 소득세계, 지급액110,
@@ -5156,7 +5156,7 @@ function printManager(){
       <div style="font-size:10px;color:#555;line-height:1.8">
         ※ <b>지급액 (110-04)</b>: 수당합계에서 4대보험·소득세 공제 후 실지급액<br>
         ※ <b>차량사례금 (210-01)</b>: 자차등록 직원의 외근_자차 일수 기반 자동 계산 — 비과세 항목, 공제 없음<br>
-        ※ <b>원천세 신고금액</b>: 110-04 지급액 + 실비 과세분 — 차량사례금(210-01)은 비과세로 미포함
+        ※ <b>원천세 신고금액</b>: 수당합계(110-04, 공제 전) + 실비 과세분(220-01) — 차량사례금(210-01)은 비과세로 미포함
       </div>
     </div>`;
 
@@ -5749,12 +5749,12 @@ async function exportExcel(){
   const firstDataRow = DET_ROW+1;
   sortedEmps.forEach((emp,ri)=>{
     const pay=calcPay(emp); const j=pay.지급; const g=pay.공제근;
-    const 수당합계=j.지급합계-j.비과세실비-j.과세실비;
+    const 수당합계=j.지급합계-j.비과세실비-j.과세실비-j.단속사례금;  // 단속사례금(210-01) 제외
     const 보험=g.보험근합; const 소득세계=g.세금합;
     const 지급액=수당합계-보험-소득세계;
     const 실비과세=j.과세실비;
     const 실비비과세=j.비과세실비;
-    const 원천세신고=지급액+실비과세;
+    const 원천세신고=수당합계+실비과세;  // 공제 전 수당합계(110-04) + 과세실비(220-01)
     // ci=7 관외출장여비: 빈 입력셀, ci=8 실수령: 수식으로 처리
     const dataVals=[수당합계,보험,소득세계,지급액,실비비과세,실비과세,실비비과세+실비과세,null,null,원천세신고];
     const rowNum=firstDataRow+ri;
@@ -5789,13 +5789,13 @@ async function exportExcel(){
   const lastDataRow=detTotalRow-1;
   const d1tot=sortedEmps.reduce((acc,emp)=>{
     const pay=calcPay(emp); const j=pay.지급; const g=pay.공제근;
-    const 수당=j.지급합계-j.비과세실비-j.과세실비;
+    const 수당=j.지급합계-j.비과세실비-j.과세실비-j.단속사례금;  // 단속사례금(210-01) 제외
     const 지급=수당-g.보험근합-g.세금합;
     const 실비비과세=j.비과세실비;
     acc[0]+=수당; acc[1]+=g.보험근합; acc[2]+=g.세금합; acc[3]+=지급;
     acc[4]+=실비비과세; acc[5]+=j.과세실비; acc[6]+=실비비과세+j.과세실비;
     // acc[7] 관외출장여비: SUM 수식, acc[8] 실수령: SUM 수식
-    acc[9]+=지급+j.과세실비; // 원천세신고
+    acc[9]+=수당+j.과세실비; // 원천세신고 = 수당합계(공제 전) + 과세실비
     return acc;
   },Array(10).fill(0));
   {const c=ws1.getCell(detTotalRow, DET_NAME_COL); c.value='합 계'; sc(c,{bold:true,bg:C.totBg,fg:C.totFg,align:'center'});}
