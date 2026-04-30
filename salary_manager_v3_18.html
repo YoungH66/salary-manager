@@ -1318,6 +1318,13 @@ header{
         </button>
 
         <div style="height:1px;background:var(--border);margin:4px 0"></div>
+        <div style="font-size:10px;font-weight:700;color:var(--text3);letter-spacing:.05em;text-transform:uppercase;padding:2px 0"><svg class="si si-sm" aria-hidden="true"><use href="#i-gear"/></svg> 고급</div>
+        <button class="btn btn-ghost" style="text-align:left;padding:12px 14px" onclick="openBudgetModal()">
+          <div style="font-weight:600;margin-bottom:2px"><svg class="si si-sm" aria-hidden="true"><use href="#i-money"/></svg> 예산 구분 출력</div>
+          <div class="u-sm u-t3">기간·예산별 인건비 배분 현황 출력 (인쇄/PDF)</div>
+        </button>
+
+        <div style="height:1px;background:var(--border);margin:4px 0"></div>
         <div style="font-size:10px;font-weight:700;color:var(--text3);letter-spacing:.05em;text-transform:uppercase;padding:2px 0"><svg class="si si-sm" aria-hidden="true"><use href="#i-users"/></svg> 직원 정보</div>
         <button class="btn btn-ghost" style="text-align:left;padding:12px 14px" onclick="exportEmployees()">
           <div style="font-weight:600;margin-bottom:2px"><svg class="si si-sm" aria-hidden="true"><use href="#i-upload"/></svg> 직원 정보 내보내기 (JSON)</div>
@@ -1420,6 +1427,7 @@ let cfg = {
   insuranceBaseDate: '2026-01-01',  // 4대보험 요율 기준연월일
   taxTableUpdatedAt: '',  // 간이세액표 마지막 업로드 일시
   customHolidays: {},     // 사용자 지정 공휴일 { 'YYYY-MM-DD': '이름' }  빈 문자열('')이면 기본값 날짜 삭제 표시
+  budgetConfigs: {},      // 예산 구분 설정 { '2026-04': { groups:[{id,name}], segments:[{startDay,endDay,empGroups:{empId->groupId}}] } }
   // 식사시간 공제 설정
   mealBreak: {
     lunch:  { start: '12:00', end: '13:00' },  // 점심 공제
@@ -5918,6 +5926,568 @@ async function exportExcel(){
   showToast('✅ 엑셀 다운로드 완료');
 }
 
+// ════════════════════════════════════════════════════════════
+//  예산 구분 (Budget Allocation)
+// ════════════════════════════════════════════════════════════
+
+function getBudgetConfig(){
+  const key=`${curYear}-${String(curMonth).padStart(2,'0')}`;
+  if(!cfg.budgetConfigs) cfg.budgetConfigs={};
+  if(!cfg.budgetConfigs[key]){
+    const daysInMonth=new Date(curYear,curMonth,0).getDate();
+    cfg.budgetConfigs[key]={
+      groups:[{id:'A',name:'A예산'},{id:'B',name:'B예산'}],
+      segments:[{startDay:1,endDay:daysInMonth,empGroups:{}}]
+    };
+  }
+  return cfg.budgetConfigs[key];
+}
+
+function saveBudgetConfig(bc){
+  const key=`${curYear}-${String(curMonth).padStart(2,'0')}`;
+  if(!cfg.budgetConfigs) cfg.budgetConfigs={};
+  cfg.budgetConfigs[key]=bc;
+  saveToStorage();
+}
+
+function openBudgetModal(){
+  closeModal('exportMo');
+  document.getElementById('budgetMonthLabel').textContent=`${curYear}년 ${curMonth}월`;
+  renderBudgetModal();
+  openModal('budgetMo');
+}
+
+function renderBudgetModal(){
+  const bc=getBudgetConfig();
+  const daysInMonth=new Date(curYear,curMonth,0).getDate();
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e)).sort((a,b)=>{
+    const ga=a.grade||'',gb=b.grade||'';
+    if(ga!==gb) return ga.localeCompare(gb,'ko');
+    return (a.name||'').localeCompare(b.name||'','ko');
+  });
+
+  // ── 예산 그룹 편집 영역 ──
+  let groupsHtml=`<div style="margin-bottom:14px">
+    <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">예산 그룹</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" id="budgetGroupList">`;
+  bc.groups.forEach((g,gi)=>{
+    groupsHtml+=`<div style="display:flex;align-items:center;gap:4px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:4px 8px">
+      <span style="font-size:11px;color:var(--text3)">그룹${gi+1}:</span>
+      <input type="text" value="${g.name}" style="border:none;background:transparent;font-size:13px;font-weight:600;width:80px;color:var(--text1)"
+        onchange="updateBudgetGroupName(${gi},this.value)" oninput="updateBudgetGroupName(${gi},this.value)">
+      ${bc.groups.length>1?`<button onclick="removeBudgetGroup(${gi})" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:14px;line-height:1;padding:0 2px">×</button>`:''}
+    </div>`;
+  });
+  groupsHtml+=`</div>
+    <button class="btn btn-ghost btn-sm" onclick="addBudgetGroup()" style="margin-top:6px;font-size:11px"><svg class="si si-sm" aria-hidden="true"><use href="#i-plus"/></svg> 그룹 추가</button>
+  </div>`;
+
+  // ── 기간 세그먼트 ──
+  let segHtml='';
+  bc.segments.forEach((seg,si)=>{
+    // 직원별 그룹 선택 행
+    let empRows='';
+    sortedEmps.forEach(emp=>{
+      const gid=seg.empGroups[emp.id]||bc.groups[0].id;
+      const opts=bc.groups.map(g=>`<option value="${g.id}" ${g.id===gid?'selected':''}>${g.name}</option>`).join('');
+      empRows+=`<tr>
+        <td style="padding:3px 8px;font-size:12px;white-space:nowrap">${emp.name}</td>
+        <td style="padding:3px 8px;font-size:11px;color:var(--text3)">${emp.grade||''}</td>
+        <td style="padding:3px 8px">
+          <select style="font-size:12px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg3);color:var(--text1)"
+            onchange="setEmpBudgetGroup(${si},'${emp.id}',this.value)">
+            ${opts}
+          </select>
+        </td>
+      </tr>`;
+    });
+
+    // 전체 일괄 버튼
+    let allBtns=bc.groups.map(g=>`<button class="btn btn-ghost btn-sm" onclick="setSegmentAllToGroup(${si},'${g.id}')" style="font-size:11px">${g.name} 전체</button>`).join('');
+
+    segHtml+=`<div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;background:var(--bg2)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="font-size:11px;color:var(--text3);font-weight:600">기간 ${si+1}</span>
+        <div style="display:flex;align-items:center;gap:4px">
+          <input type="number" min="1" max="${daysInMonth}" value="${seg.startDay}" style="width:48px;font-size:13px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg3);color:var(--text1);text-align:center"
+            onchange="updateBudgetSegment(${si},'startDay',+this.value)">
+          <span style="font-size:12px;color:var(--text3)">일 ~</span>
+          <input type="number" min="1" max="${daysInMonth}" value="${seg.endDay}" style="width:48px;font-size:13px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg3);color:var(--text1);text-align:center"
+            onchange="updateBudgetSegment(${si},'endDay',+this.value)">
+          <span style="font-size:12px;color:var(--text3)">일</span>
+        </div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">${allBtns}</div>
+        ${bc.segments.length>1?`<button onclick="removeBudgetSegment(${si})" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--danger);font-size:13px">🗑</button>`:''}
+      </div>
+      <div style="overflow-x:auto">
+        <table style="border-collapse:collapse;width:100%">
+          <thead><tr>
+            <th style="text-align:left;padding:3px 8px;font-size:11px;color:var(--text3);font-weight:600">이름</th>
+            <th style="text-align:left;padding:3px 8px;font-size:11px;color:var(--text3);font-weight:600">구분</th>
+            <th style="text-align:left;padding:3px 8px;font-size:11px;color:var(--text3);font-weight:600">예산 그룹</th>
+          </tr></thead>
+          <tbody>${empRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('budgetModalBody').innerHTML=groupsHtml+segHtml;
+}
+
+function updateBudgetGroupName(gi,val){
+  const bc=getBudgetConfig(); bc.groups[gi].name=val; saveBudgetConfig(bc);
+}
+function addBudgetGroup(){
+  const bc=getBudgetConfig();
+  const letters='ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const id=letters[bc.groups.length]||`G${bc.groups.length+1}`;
+  bc.groups.push({id,name:`${id}예산`});
+  saveBudgetConfig(bc); renderBudgetModal();
+}
+function removeBudgetGroup(gi){
+  const bc=getBudgetConfig();
+  if(bc.groups.length<=1){showToast('그룹이 1개 이상 있어야 합니다');return;}
+  const removed=bc.groups[gi].id;
+  bc.groups.splice(gi,1);
+  const fallback=bc.groups[0].id;
+  bc.segments.forEach(seg=>{
+    Object.keys(seg.empGroups).forEach(eid=>{ if(seg.empGroups[eid]===removed) seg.empGroups[eid]=fallback; });
+  });
+  saveBudgetConfig(bc); renderBudgetModal();
+}
+function updateBudgetSegment(si,field,val){
+  const bc=getBudgetConfig(); bc.segments[si][field]=val; saveBudgetConfig(bc);
+}
+function addBudgetSegment(){
+  const bc=getBudgetConfig();
+  const daysInMonth=new Date(curYear,curMonth,0).getDate();
+  bc.segments.push({startDay:1,endDay:daysInMonth,empGroups:{}});
+  saveBudgetConfig(bc); renderBudgetModal();
+}
+function removeBudgetSegment(si){
+  const bc=getBudgetConfig();
+  if(bc.segments.length<=1){showToast('기간이 1개 이상 있어야 합니다');return;}
+  bc.segments.splice(si,1);
+  saveBudgetConfig(bc); renderBudgetModal();
+}
+function setEmpBudgetGroup(si,empId,gid){
+  const bc=getBudgetConfig(); bc.segments[si].empGroups[empId]=gid; saveBudgetConfig(bc);
+}
+function setSegmentAllToGroup(si,gid){
+  const bc=getBudgetConfig();
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e));
+  sortedEmps.forEach(emp=>{ bc.segments[si].empGroups[emp.id]=gid; });
+  saveBudgetConfig(bc); renderBudgetModal();
+}
+
+// ── 세그먼트 실계산: 해당 기간의 일별 수당·실비를 직접 산출 ──
+// segD1~segD2: 계약 교차 후 실제 day 숫자
+// ratio: segDays/empTotalDays (성과수당·공제 등 월 단위 항목 비율 배분용)
+function calcSegmentPay(emp, fullPay, segD1, segD2, ratio){
+  const m=getEmpMonth(emp);
+  const days=m.days;
+  const daysInMonth=new Date(curYear,curMonth,0).getDate();
+  const mul=cfg.multiplier;
+
+  // ── 전체 월 주차별 집계 (토요 40시간 기준 + 주휴 판단용) ──
+  const weekCD={},weekAbs={},weekH={},weekHExSat={},weekAW={};
+  const init=wk=>{if(!weekCD[wk]){weekCD[wk]=0;weekAbs[wk]=false;weekH[wk]=0;weekHExSat[wk]=0;weekAW[wk]=false;}};
+
+  // 이전 달 마지막 6일
+  const pm=curMonth===1?12:curMonth-1, py=curMonth===1?curYear-1:curYear;
+  const pDim=new Date(py,pm,0).getDate();
+  for(let d=pDim-5;d<=pDim;d++){
+    const ds=dateStr(py,pm,d); const dow=getDow(py,pm,d);
+    const wk=getWeekKey(py,pm,d,emp.start); init(wk);
+    const isHol=!!getHoliday(ds);
+    const pmKey=`${py}-${String(pm).padStart(2,'0')}`;
+    const pmData=emp.monthly[pmKey];
+    const defSt=defaultDayStatus(py,pm,d,emp.grade,emp);
+    if(defSt.type==='off-contract') continue;
+    const st=(pmData&&pmData.days[d])?pmData.days[d]:defSt;
+    if(st.type==='work'||st.type==='work_ot'||st.type==='work_night'){
+      const {total}=calcOtNightFromTime(st.timeIn,st.timeOut,emp.shift);
+      weekH[wk]+=total;
+      if(dow!==6) weekHExSat[wk]+=isHol?total:Math.min(total,getShiftHours(emp.shift));
+    } else if(st.type==='half_am'||st.type==='half_pm'){weekH[wk]+=4;if(dow!==6)weekHExSat[wk]+=4;}
+    if(dow>=1&&dow<=5&&!isHol){
+      weekCD[wk]++;
+      if(st.type==='off'||(st.type==='sick'&&!st.paid)||st.type==='health') weekAbs[wk]=true;
+      if(st.type==='work'||st.type==='work_ot'||st.type==='work_night'||st.type==='half_am'||st.type==='half_pm') weekAW[wk]=true;
+    }
+  }
+  // 현재 달 전체
+  for(let d=1;d<=daysInMonth;d++){
+    const ds=dateStr(curYear,curMonth,d); const dow=getDow(curYear,curMonth,d);
+    const cs=defaultDayStatus(curYear,curMonth,d,emp.grade,emp);
+    if(cs.type==='off-contract') continue;
+    const st=days[d]||cs; const isHol=!!getHoliday(ds); const isSat=dow===6;
+    const wk=getWeekKey(curYear,curMonth,d,emp.start); init(wk);
+    if(st.type==='work'||st.type==='work_ot'||st.type==='work_night'){
+      const {total}=calcOtNightFromTime(st.timeIn,st.timeOut,emp.shift);
+      weekH[wk]+=total;
+      if(!isSat) weekHExSat[wk]+=isHol?total:Math.min(total,getShiftHours(emp.shift));
+    } else if(st.type==='half_am'||st.type==='half_pm'){weekH[wk]+=4;if(!isSat)weekHExSat[wk]+=4;}
+    if(dow>=1&&dow<=5&&!isHol){
+      weekCD[wk]++;
+      if(st.type==='off'||(st.type==='sick'&&!st.paid)||st.type==='health') weekAbs[wk]=true;
+      if(st.type==='work'||st.type==='work_ot'||st.type==='work_night'||st.type==='half_am'||st.type==='half_pm') weekAW[wk]=true;
+    }
+  }
+
+  // ── 세그먼트 일별 수당·실비 직접 계산 ──
+  let 근무pay=0, 토요40미만pay=0, 토요40이상pay=0, 휴일pay=0;
+  let 법정유급수당=0, 월차수당=0, 유급병가수당=0;
+  let 비과세실비raw=0, 단속자차일수=0;
+
+  for(let d=segD1;d<=segD2;d++){
+    const ds=dateStr(curYear,curMonth,d); const dow=getDow(curYear,curMonth,d);
+    const cs=defaultDayStatus(curYear,curMonth,d,emp.grade,emp);
+    if(cs.type==='off-contract') continue;
+    const st=days[d]||cs;
+    const isHol=!!getHoliday(ds); const isSun=dow===0; const isSat=dow===6;
+    const wk=getWeekKey(curYear,curMonth,d,emp.start);
+    const weekExSat=weekHExSat[wk]||0;
+    const dayGrade=getGradeAt(emp,ds);
+    const dayHourly=getHourlyRate(dayGrade);
+    const dayDaily=dayHourly*8;
+    const isWork=st.type==='work'||st.type==='work_ot'||st.type==='work_night';
+
+    if(isSun){
+      // 주휴수당은 아래에서 별도 처리; 여기서는 일요일 출장·휴일 근무pay만
+      const isSunHol=!!getHoliday(ds);
+      const wkJu=weekCD[wk]>0&&!weekAbs[wk];
+      if(isWork){
+        const {payUnits}=calcPayByTime(st.timeIn,st.timeOut,emp.shift,'holiday');
+        휴일pay+=payUnits*dayHourly;
+      }
+      if(isSunHol&&!wkJu) 법정유급수당+=dayDaily;
+    } else if(isSat){
+      if(isHol){
+        if(isWork){const {payUnits}=calcPayByTime(st.timeIn,st.timeOut,emp.shift,'holiday');휴일pay+=payUnits*dayHourly;}
+      } else if(isWork){
+        const remain=Math.max(0,40-weekExSat);
+        if(weekExSat>=40){
+          const {payUnits}=calcPayByTime(st.timeIn,st.timeOut,emp.shift,'sat40over');토요40이상pay+=payUnits*dayHourly;
+        } else if(remain>=24){
+          const {payUnits}=calcPayByTime(st.timeIn,st.timeOut,emp.shift,'sat40under');토요40미만pay+=payUnits*dayHourly;
+        } else {
+          const p=t=>{const[h,mm]=t.split(':').map(Number);return h*60+mm;};
+          let inM=p(st.timeIn),outM=p(st.timeOut);if(outM<=inM)outM+=1440;
+          const splitM=inM+Math.round(remain*60);
+          const splitT=`${String(Math.floor(splitM/60)%24).padStart(2,'0')}:${String(splitM%60).padStart(2,'0')}`;
+          if(splitM>inM){const {payUnits:pu1}=calcPayByTime(st.timeIn,splitT,emp.shift,'sat40under');토요40미만pay+=pu1*dayHourly;}
+          if(splitM<outM){const {payUnits:pu2}=calcPayByTime(splitT,st.timeOut,emp.shift,'sat40over');토요40이상pay+=pu2*dayHourly;}
+        }
+      }
+    } else if(isHol){
+      if(isWork){const {payUnits}=calcPayByTime(st.timeIn,st.timeOut,emp.shift,'holiday');휴일pay+=payUnits*dayHourly;}
+      법정유급수당+=dayDaily;
+    } else {
+      // 평일
+      if(isWork){
+        if(st.timeIn&&st.timeOut){const {payUnits}=calcPayByTime(st.timeIn,st.timeOut,emp.shift,'weekday');근무pay+=payUnits*dayHourly;}
+        else{근무pay+=dayDaily;if(st.ot)근무pay+=st.ot*mul.평일초과*dayHourly;if(st.night)근무pay+=st.night*mul.평일야간초과*dayHourly;}
+      } else if(st.type==='annual'){
+        월차수당+=dayDaily;
+      } else if(st.type==='half_am'||st.type==='half_pm'){
+        근무pay+=dayDaily;
+      } else if(st.type==='sick'&&st.paid){
+        유급병가수당+=dayDaily;
+      } else if(st.type==='pub'||st.type==='special'){
+        근무pay+=dayDaily;
+      }
+    }
+
+    // 실비 + 단속 (출장 잠금일 제외)
+    if(!st._tripLocked&&isWork){
+      const over4h=st.fieldOver4h!==false;
+      if(st.worktype==='field_gov'){if(over4h)비과세실비raw+=cfg.expense.관용;}
+      else if(st.worktype==='field_own'){
+        비과세실비raw+=over4h?cfg.expense.자차:cfg.expense.관용;
+        if(st.본인차량!==false) 단속자차일수++;
+      }
+    }
+  }
+
+  // 주휴수당: 해당 주의 일요일이 세그먼트 [segD1..segD2]에 속하는 주만
+  let 주휴수당=0;
+  for(const wk in weekCD){
+    if(weekCD[wk]<=0||weekAbs[wk]||!weekAW[wk]) continue;
+    const [wy,wm,wd]=wk.split('-').map(Number);
+    const sunDt=new Date(wy,wm-1,wd+6);
+    if(sunDt.getFullYear()===curYear&&sunDt.getMonth()===curMonth-1){
+      const sunD=sunDt.getDate();
+      if(sunD>=segD1&&sunD<=segD2){
+        const sunDs=dateStr(curYear,curMonth,sunD);
+        const sunGrade=getGradeAt(emp,sunDs);
+        주휴수당+=getHourlyRate(sunGrade)*8*mul.평일기본;
+      }
+    }
+  }
+
+  // 성과수당 · 미사용월차수당: 비율 배분
+  const 성과수당=Math.round((m.성과수당||0)*ratio);
+  const 미사용월차수당=Math.round((fullPay.지급.미사용월차수당||0)*ratio);
+
+  // 실비 과세/비과세 분리
+  const 실비한도=cfg.expLimitReimbursement;
+  const 비과세실비=실비한도===null?비과세실비raw:Math.min(비과세실비raw,실비한도);
+  const 과세실비=실비한도===null?0:Math.max(0,비과세실비raw-실비한도);
+
+  // 단속사례금
+  const 단속단가=(cfg.단속사례금지역||'sigun')==='gu'?(cfg.단속단가구지역||15000):(cfg.단속단가시군지역||20000);
+  const 단속raw=emp.자차등록?(단속자차일수*단속단가):0;
+  const 단속비과세=Math.min(단속raw,cfg.expLimit);
+  const 단속과세=Math.max(0,단속raw-cfg.expLimit);
+  const 단속사례금=단속raw;
+
+  // 수당합계 (순수 수당, 실비·단속사례금 별도)
+  const 수당합계=근무pay+주휴수당+토요40미만pay+토요40이상pay+휴일pay+법정유급수당+월차수당+미사용월차수당+유급병가수당+성과수당;
+  const 지급합계=수당합계+단속사례금+비과세실비+과세실비;
+
+  // 공제·사업주보험: 비율 배분 (보수월액 기준이므로)
+  const 공제합계=Math.round((fullPay.공제근.공제합계||0)*ratio);
+  const 보험사합=Math.round((fullPay.공제사.보험사합||0)*ratio);
+
+  const _et=ELECTION_TYPES.find(e=>e.label===cfg.electionType)||ELECTION_TYPES[0];
+  const _rd=v=>_et.rounding==='none'?Math.floor(v):Math.ceil(v/10)*10;
+  const 실수령=_rd(지급합계-공제합계);
+  const 총인건비=지급합계+보험사합;
+
+  return {수당합계,비과세실비,과세실비,단속사례금,공제합계,실수령,보험사합,총인건비};
+}
+
+function calcBudgetAllocation(){
+  const bc=getBudgetConfig();
+  const daysInMonth=new Date(curYear,curMonth,0).getDate();
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e)).sort((a,b)=>{
+    const ga=a.grade||'',gb=b.grade||'';
+    if(ga!==gb) return ga.localeCompare(gb,'ko');
+    return (a.name||'').localeCompare(b.name||'','ko');
+  });
+
+  const ZERO={수당합계:0,비과세실비:0,과세실비:0,단속사례금:0,공제합계:0,실수령:0,보험사합:0,총인건비:0};
+
+  // result[gid].segs[si] = {rows:[], totals:{...ZERO}}  (세그먼트 인덱스별 분리)
+  const result={};
+  bc.groups.forEach(g=>{
+    result[g.id]={
+      name:g.name,
+      segs: bc.segments.map(()=>({rows:[],totals:{...ZERO}})),
+      totals:{...ZERO}
+    };
+  });
+
+  sortedEmps.forEach(emp=>{
+    const fullPay=calcPay(emp);
+
+    const contractStart=emp.start?new Date(emp.start):new Date(curYear,curMonth-1,1);
+    const contractEnd  =emp.end  ?new Date(emp.end)  :new Date(curYear,curMonth-1,daysInMonth);
+    const effStart=contractStart>new Date(curYear,curMonth-1,1)?contractStart:new Date(curYear,curMonth-1,1);
+    const effEnd  =contractEnd  <new Date(curYear,curMonth-1,daysInMonth)?contractEnd:new Date(curYear,curMonth-1,daysInMonth);
+    const empTotalDays=Math.max(0,Math.round((effEnd-effStart)/86400000)+1);
+    if(empTotalDays===0) return;
+
+    bc.segments.forEach((seg,si)=>{
+      const segS=new Date(curYear,curMonth-1,seg.startDay);
+      const segE=new Date(curYear,curMonth-1,seg.endDay);
+      const intS=segS>effStart?segS:effStart;
+      const intE=segE<effEnd  ?segE:effEnd;
+      const segDays=Math.max(0,Math.round((intE-intS)/86400000)+1);
+      if(segDays<=0) return;
+      const segD1=intS.getDate(), segD2=intE.getDate();
+      const ratio=segDays/empTotalDays;
+      const gid=seg.empGroups[emp.id]||bc.groups[0].id;
+
+      const sp=calcSegmentPay(emp,fullPay,segD1,segD2,ratio);
+      // 세그먼트별 분리 저장
+      result[gid].segs[si].rows.push({emp,days:segDays,ratio,pay:sp});
+      Object.keys(ZERO).forEach(k=>{ result[gid].segs[si].totals[k]+=(sp[k]||0); });
+      Object.keys(ZERO).forEach(k=>{ result[gid].totals[k]+=(sp[k]||0); });
+    });
+  });
+
+  return {bc, result, daysInMonth, sortedEmps};
+}
+
+function printBudgetAllocation(){
+  if(employees.length===0){showToast('직원 정보를 먼저 입력해주세요');return;}
+  const sortedEmps=[...employees].filter(e=>!isMonthOffContract(e));
+  if(sortedEmps.length===0){showToast('이번 달 계약 기간에 해당하는 직원이 없습니다.');return;}
+
+  const {bc,result,daysInMonth}=calcBudgetAllocation();
+  const org=cfg.org.기관명||'';
+  const ym=`${curYear}년 ${curMonth}월`;
+  const fmt=v=>v===0?'-':(v<0?`(${Math.abs(v).toLocaleString()})`:`${v.toLocaleString()}`);
+
+  // ── 요약 페이지 ──
+  const groupKeys=bc.groups.map(g=>g.id);
+  let summaryRows='';
+  // 총인건비 항목별 요약
+  const labels=[
+    {key:'수당합계',label:'수당합계 (110-04)'},
+    {key:'비과세실비',label:'비과세실비 (220-02)'},
+    {key:'과세실비',label:'과세실비 (220-01)'},
+    {key:'단속사례금',label:'단속차량사례금 (210-01)'},
+    {key:'공제합계',label:'공제합계 (비율배분)'},
+    {key:'실수령',label:'실수령액'},
+    {key:'보험사합',label:'4대보험 사업주부담 (비율배분)'},
+    {key:'총인건비',label:'총 인건비'},
+  ];
+  labels.forEach(({key,label})=>{
+    const isTotal=(key==='총인건비');
+    const isSection=(key==='실수령'||key==='공제합계'||key==='보험사합');
+    summaryRows+=`<tr style="${isTotal?'font-weight:700;border-top:2px solid #000':isSection?'border-top:1px solid #ccc':''}">
+      <td style="padding:4px 8px;font-size:12px;border:1px solid #ddd;white-space:nowrap">${label}</td>
+      ${groupKeys.map(gid=>`<td style="text-align:right;padding:4px 8px;font-size:12px;border:1px solid #ddd">${fmt(result[gid].totals[key])}</td>`).join('')}
+      <td style="text-align:right;padding:4px 8px;font-size:12px;border:1px solid #ddd;font-weight:600">${fmt(groupKeys.reduce((s,gid)=>s+(result[gid].totals[key]||0),0))}</td>
+    </tr>`;
+  });
+
+  let summaryHtml=`<div class="page" style="margin-bottom:24px">
+    <div style="text-align:center;margin-bottom:16px">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px">${org}</div>
+      <div style="font-size:18px;font-weight:700">${ym} 예산별 인건비 배분 현황</div>
+      <div style="font-size:11px;color:#666;margin-top:4px">출력일: ${new Date().toLocaleDateString('ko-KR')}</div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif">
+      <thead>
+        <tr style="background:#f1f5f9">
+          <th style="text-align:left;padding:5px 8px;font-size:12px;border:1px solid #ddd">항목</th>
+          ${bc.groups.map(g=>`<th style="text-align:right;padding:5px 8px;font-size:12px;border:1px solid #ddd">${g.name}</th>`).join('')}
+          <th style="text-align:right;padding:5px 8px;font-size:12px;border:1px solid #ddd">합계</th>
+        </tr>
+      </thead>
+      <tbody>${summaryRows}</tbody>
+    </table>
+  </div>`;
+
+  // ── 그룹별 상세 페이지 (기간별 구분) ──
+  const COL='padding:4px 6px;font-size:11px;border:1px solid #ddd';
+  const COLR=COL+';text-align:right';
+  const thead=`<thead><tr style="background:#f1f5f9">
+    <th style="${COL};white-space:nowrap">번호</th>
+    <th style="${COL};white-space:nowrap">이름</th>
+    <th style="${COL};white-space:nowrap">구분</th>
+    <th style="${COL};white-space:nowrap">배분일수</th>
+    <th style="${COLR};white-space:nowrap">수당합계</th>
+    <th style="${COLR};white-space:nowrap">비과세실비</th>
+    <th style="${COLR};white-space:nowrap">과세실비</th>
+    <th style="${COLR};white-space:nowrap">단속사례금</th>
+    <th style="${COLR};white-space:nowrap">공제합계</th>
+    <th style="${COLR};white-space:nowrap">실수령액</th>
+    <th style="${COLR};white-space:nowrap">사업주보험</th>
+    <th style="${COLR};white-space:nowrap">총인건비</th>
+  </tr></thead>`;
+
+  const fmtRow=(p,days,ratio,label,bold)=>`<tr style="${bold?'font-weight:700;background:#f1f5f9;border-top:2px solid #888':''}">
+    ${label
+      ?`<td colspan="3" style="${COL}">${label}</td><td style="${COL};text-align:center">-</td>`
+      :`<td style="${COL}"></td><td style="${COL}"></td><td style="${COL}"></td><td style="${COL};text-align:center">${days}일<span style="font-size:10px;color:#888;margin-left:4px">(${(ratio*100).toFixed(1)}%)</span></td>`}
+    <td style="${COLR}">${fmt(p.수당합계)}</td>
+    <td style="${COLR}">${fmt(p.비과세실비)}</td>
+    <td style="${COLR}">${fmt(p.과세실비)}</td>
+    <td style="${COLR}">${fmt(p.단속사례금)}</td>
+    <td style="${COLR}">${fmt(p.공제합계)}</td>
+    <td style="${COLR}">${fmt(p.실수령)}</td>
+    <td style="${COLR}">${fmt(p.보험사합)}</td>
+    <td style="${COLR};font-weight:600">${fmt(p.총인건비)}</td>
+  </tr>`;
+
+  let detailHtml='';
+  bc.groups.forEach(g=>{
+    const grp=result[g.id];
+    const totals=grp.totals;
+    // 이 그룹에 행이 하나라도 있는지 확인
+    const hasAny=grp.segs.some(s=>s.rows.length>0);
+    if(!hasAny) return;
+
+    // 기간별 tbody 구성 (startDay 오름차순 정렬)
+    const sortedSi=[...bc.segments.keys()].sort((a,b)=>bc.segments[a].startDay-bc.segments[b].startDay);
+    let tbody='';
+    let segOrder=0;
+    sortedSi.forEach(si=>{
+      const segData=grp.segs[si];
+      if(segData.rows.length===0) return;
+      const seg=bc.segments[si];
+      const segLabel=`${seg.startDay}일 ~ ${seg.endDay}일 (${segData.rows.length}명)`;
+
+      // 기간 구분 헤더 행
+      tbody+=`<tr><td colspan="12" style="padding:5px 8px;font-size:11px;font-weight:700;background:#e0e7ff;border:1px solid #c7d2fe;border-top:${segOrder===0?'1px':'2px'} solid #818cf8">
+        ◆ 기간 ${segOrder+1}: ${segLabel}
+      </td></tr>`;
+      segOrder++;
+
+      // 직원 행
+      segData.rows.forEach(({emp,days,ratio,pay:p},ri)=>{
+        tbody+=`<tr style="${ri%2===0?'':'background:#fafafa'}">
+          <td style="${COL};white-space:nowrap">${ri+1}</td>
+          <td style="${COL};white-space:nowrap">${emp.name}</td>
+          <td style="${COL};white-space:nowrap">${emp.grade||''}</td>
+          <td style="${COL};text-align:center">${days}일<span style="font-size:10px;color:#888;margin-left:4px">(${(ratio*100).toFixed(1)}%)</span></td>
+          <td style="${COLR}">${fmt(p.수당합계)}</td>
+          <td style="${COLR}">${fmt(p.비과세실비)}</td>
+          <td style="${COLR}">${fmt(p.과세실비)}</td>
+          <td style="${COLR}">${fmt(p.단속사례금)}</td>
+          <td style="${COLR}">${fmt(p.공제합계)}</td>
+          <td style="${COLR}">${fmt(p.실수령)}</td>
+          <td style="${COLR}">${fmt(p.보험사합)}</td>
+          <td style="${COLR};font-weight:600">${fmt(p.총인건비)}</td>
+        </tr>`;
+      });
+
+      // 기간별 소계 (세그먼트가 2개 이상일 때만)
+      if(grp.segs.filter(s=>s.rows.length>0).length>1){
+        const st=segData.totals;
+        tbody+=`<tr style="background:#eff6ff;font-style:italic">
+          <td colspan="3" style="${COL};font-size:10px;color:#4f46e5">소계 (${seg.startDay}일~${seg.endDay}일)</td>
+          <td style="${COL};text-align:center">-</td>
+          <td style="${COLR}">${fmt(st.수당합계)}</td>
+          <td style="${COLR}">${fmt(st.비과세실비)}</td>
+          <td style="${COLR}">${fmt(st.과세실비)}</td>
+          <td style="${COLR}">${fmt(st.단속사례금)}</td>
+          <td style="${COLR}">${fmt(st.공제합계)}</td>
+          <td style="${COLR}">${fmt(st.실수령)}</td>
+          <td style="${COLR}">${fmt(st.보험사합)}</td>
+          <td style="${COLR};font-weight:600">${fmt(st.총인건비)}</td>
+        </tr>`;
+      }
+    });
+
+    // 합계 행
+    tbody+=`<tr style="font-weight:700;background:#f1f5f9;border-top:2px solid #666">
+      <td colspan="3" style="${COL}">합계</td>
+      <td style="${COL};text-align:center">-</td>
+      <td style="${COLR}">${fmt(totals.수당합계)}</td>
+      <td style="${COLR}">${fmt(totals.비과세실비)}</td>
+      <td style="${COLR}">${fmt(totals.과세실비)}</td>
+      <td style="${COLR}">${fmt(totals.단속사례금)}</td>
+      <td style="${COLR}">${fmt(totals.공제합계)}</td>
+      <td style="${COLR}">${fmt(totals.실수령)}</td>
+      <td style="${COLR}">${fmt(totals.보험사합)}</td>
+      <td style="${COLR};font-weight:700">${fmt(totals.총인건비)}</td>
+    </tr>`;
+
+    detailHtml+=`<div class="page" style="margin-bottom:24px;page-break-before:always">
+      <div style="text-align:center;margin-bottom:12px">
+        <div style="font-size:14px;font-weight:700">${org} &nbsp;${ym}</div>
+        <div style="font-size:16px;font-weight:700;margin-top:2px">${g.name} 인건비 배분 상세</div>
+      </div>
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:11px">
+        ${thead}<tbody>${tbody}</tbody>
+      </table>
+      </div>
+    </div>`;
+  });
+
+  closeModal('budgetMo');
+  addLog('BUDGET_PRINT',`${curYear}년 ${curMonth}월 예산 구분 출력 (${bc.groups.length}그룹)`);
+  printHtml(summaryHtml+detailHtml,`${ym} 예산별 인건비 배분 현황`,'landscape');
+}
+
 function clearStorage(){
   if(!confirm('이 브라우저에 저장된 모든 직원 데이터를 삭제하시겠습니까?\n(HTML 파일 자체는 변경되지 않습니다)')) return;
   addLog('DATA_CLEAR', `전체 데이터 초기화 (직원 ${employees.length}명 삭제)`);
@@ -7457,6 +8027,25 @@ document.addEventListener('DOMContentLoaded', function(){
 <footer style="text-align:center;padding:16px;font-size:11px;color:#94a3b8;border-top:1px solid var(--border);margin-top:8px;background:var(--bg2)">
   공정선거지원단 수당 관리 v3.18 &nbsp;·&nbsp; 데이터는 이 브라우저에만 저장됩니다. 정기적으로 <b>전체 데이터 백업(JSON)</b>을 저장해 두세요.
 </footer>
+<!-- ═══ BUDGET MODAL ═══ -->
+<div class="mo" id="budgetMo">
+  <div class="mo-box" style="max-width:min(640px,97vw);max-height:90vh;display:flex;flex-direction:column">
+    <div class="mo-hdr">
+      <span class="mo-title"><svg class="si" aria-hidden="true"><use href="#i-money"/></svg> 예산 구분 출력</span>
+      <button class="mo-x" onclick="closeModal('budgetMo')">✕</button>
+    </div>
+    <div class="mo-body" style="overflow-y:auto;flex:1;padding-bottom:8px">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:12px"><b id="budgetMonthLabel"></b> 기준 &nbsp;·&nbsp; 인건비를 예산별로 일할 배분합니다. 직원들이 실제 받는 수당은 변경되지 않습니다.</p>
+      <div id="budgetModalBody"></div>
+    </div>
+    <div class="mo-footer" style="flex-wrap:wrap;gap:6px">
+      <button class="btn btn-ghost btn-sm" onclick="addBudgetSegment()" style="margin-right:auto"><svg class="si si-sm" aria-hidden="true"><use href="#i-plus"/></svg> 기간 추가</button>
+      <button class="btn btn-ghost" onclick="closeModal('budgetMo')">취소</button>
+      <button class="btn btn-primary" onclick="printBudgetAllocation()"><svg class="si si-sm" aria-hidden="true"><use href="#i-print"/></svg> 출력</button>
+    </div>
+  </div>
+</div>
+
 <!-- 드럼롤 팝업 — body 직하위 (stacking context 문제 방지) -->
 <div id="tp_drum_overlay" style="display:none;position:fixed;inset:0;z-index:9000" onclick="tpCloseDrum()"></div>
 <div id="tp_drum" style="display:none;position:fixed;z-index:9001;background:var(--bg2);border:1px solid var(--border);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,0.22);overflow:hidden;width:88px">
